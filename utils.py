@@ -5,10 +5,20 @@ def fetch_games():
     """Fetch the list of available NBA games from Balldontlie API."""
     url = "https://www.balldontlie.io/api/v1/games?start_date=today&end_date=today"
     headers = {"Authorization": "Bearer YOUR_API_KEY"}
-    response = requests.get(url, headers=headers)
-    if response.status_code == 200:
-        return [f"{game['home_team']['abbreviation']} v {game['visitor_team']['abbreviation']}" for game in response.json()['data']]
-    return []
+    
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()  # Raise an error for bad responses (e.g., 401, 500)
+
+        data = response.json()
+        if "data" in data and len(data["data"]) > 0:
+            return [f"{game['home_team']['abbreviation']} v {game['visitor_team']['abbreviation']}" for game in data['data']]
+        else:
+            return ["No games available"]
+    
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching games: {e}")
+        return ["Error fetching games"]
 
 def fetch_props(game):
     """Fetch player props for a given game from The Odds API."""
