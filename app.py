@@ -8,7 +8,7 @@ from utils import (
 )
 
 # Streamlit UI Setup
-st.set_page_config(page_title="NBA SGP Builder", layout="wide")
+st.set_page_config(page_title="NBA SGP+ Builder", layout="wide")
 st.title("NBA Same Game Parlay Builder")
 st.markdown("Build your NBA Same Game Parlay below!")
 
