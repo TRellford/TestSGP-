@@ -2,3 +2,4 @@ streamlit
 requests
 numpy
 scipy
+nba_api
