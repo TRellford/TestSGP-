@@ -1,4 +1,3 @@
-
 import requests
 import numpy as np
 from datetime import date
@@ -9,6 +8,18 @@ import random
 # Constants
 BALL_DONT_LIE_API_URL = "https://api.balldontlie.io/v1"
 ODDS_API_URL = "https://api.the-odds-api.com/v4"
+
+# Team name normalization to handle discrepancies
+TEAM_NAME_MAPPING = {
+    "los angeles clippers": "la clippers",
+    "golden state warriors": "golden state warriors",  # Add more as needed
+    # Add other known discrepancies here
+}
+
+def normalize_team_name(name):
+    """Normalize team names for consistent matching between APIs."""
+    name = name.lower().strip()
+    return TEAM_NAME_MAPPING.get(name, name)
 
 def fetch_games(date, max_retries=3, initial_delay=2):
     """Fetch NBA games from Balldontlie API for a given date with retries."""
@@ -99,7 +110,7 @@ def fetch_odds_api_events(date, max_retries=3, initial_delay=2):
                 st.warning(f"The Odds API rate limit reached. Retrying in {wait_time} seconds... (Attempt {retries}/{max_retries})")
                 time.sleep(wait_time)
             else:
-                st.error(f"Error fetching events from The Odds API: {response.status_code} - {response.text}")
+               emblems: {response.status_code} - {response.text}")
                 return []
         except requests.exceptions.RequestException as e:
             st.error(f"Network error fetching events from The Odds API: {e}")
