@@ -1,194 +1,227 @@
-import streamlit as st
+import requests
+import numpy as np
 from datetime import date
-from utils import (
-    fetch_games, fetch_odds_api_events, fetch_props, calculate_parlay_odds,
-    get_initial_confidence, get_sharp_money_insights, detect_line_discrepancies,
-    american_odds_to_string
-)
+import streamlit as st
+import time
+import random
 
-# Streamlit UI Setup
-st.set_page_config(page_title="NBA SGP Builder", layout="wide")
-st.title("NBA Same Game Parlay Builder")
-st.markdown("Build your NBA Same Game Parlay below!")
+# Constants
+BALL_DONT_LIE_API_URL = "https://api.balldontlie.io/v1"
+ODDS_API_URL = "https://api.the-odds-api.com/v4"
 
-# Automatically use today's date
-current_date = date.today()
+# Team name normalization to handle discrepancies
+TEAM_NAME_MAPPING = {
+    "los angeles clippers": "la clippers",
+    "golden state warriors": "golden state warriors",  # Add more as needed
+    # Add other known discrepancies here
+}
 
-# Sidebar for Filters
-st.sidebar.subheader("Filters")
+def normalize_team_name(name):
+    """Normalize team names for consistent matching between APIs."""
+    name = name.lower().strip()
+    return TEAM_NAME_MAPPING.get(name, name)
 
-# Odds Range Filter
-use_odds_filter = st.sidebar.checkbox("Apply Odds Range Filter", value=False)
-min_odds, max_odds = -1000, 1000  # Default: no filtering
-if use_odds_filter:
-    min_odds = st.sidebar.number_input("Min Odds", min_value=-1000, max_value=1000, value=-350, step=10)
-    max_odds = st.sidebar.number_input("Max Odds", min_value=-1000, max_value=1000, value=200, step=10)
+def fetch_games(date, max_retries=3, initial_delay=2):
+    """Fetch NBA games from Balldontlie API for a given date with retries."""
+    api_key = st.secrets.get("balldontlie_api_key", None)
+    if not api_key:
+        st.error("Invalid API key for Balldontlie API. Check configuration.")
+        return []
 
-# Prop Type Selection
-st.sidebar.subheader("Prop Types to Include")
-prop_types = st.sidebar.multiselect(
-    "Select Prop Types",
-    options=["points", "rebounds", "assists", "steals", "blocks"],
-    default=["points", "rebounds", "assists", "steals", "blocks"],
-    help="Choose which prop types to include in your SGP."
-)
+    url = f"{BALL_DONT_LIE_API_URL}/games"
+    headers = {"Authorization": api_key}
+    params = {"dates[]": date.strftime("%Y-%m-%d")}
 
-# Number of Props per Game
-st.sidebar.subheader("Props per Game")
-props_per_game = st.sidebar.number_input(
-    "Number of Props per Game", min_value=1, max_value=8, value=3, step=1,
-    help="Select how many props to include per game (1-8)."
-)
+    retries = 0
+    while retries < max_retries:
+        try:
+            time.sleep(initial_delay)  # Delay to avoid rate limits
+            response = requests.get(url, headers=headers, params=params, timeout=10)
+            print(f"Balldontlie Request URL: {response.url}")
+            print(f"Balldontlie Response Status Code: {response.status_code}")
+            print(f"Balldontlie Raw Response: {response.text}")
 
-# Fetch Games from Balldontlie API
-games = fetch_games(current_date)
+            response.raise_for_status()
 
-if not games:
-    st.info("No NBA games scheduled for today.")
-else:
-    # Fetch Events from The Odds API
-    odds_api_events = fetch_odds_api_events(current_date)
+            games_data = response.json().get("data", [])
+            if not games_data:
+                return []
+
+            formatted_games = [
+                {
+                    "id": game["id"],
+                    "display": f"{game['home_team']['abbreviation']} vs {game['visitor_team']['abbreviation']}",
+                    "home_team": game["home_team"]["full_name"],
+                    "away_team": game["visitor_team"]["full_name"],
+                    "date": game["date"]
+                }
+                for game in games_data
+            ]
+            return formatted_games
+
+        except requests.exceptions.HTTPError as e:
+            if response.status_code == 401:
+                st.error("Invalid API key for Balldontlie API. Check configuration.")
+                return []
+            elif response.status_code == 429:
+                retries += 1
+                wait_time = initial_delay * (2 ** retries)
+                st.warning(f"Balldontlie API rate limit reached. Retrying in {wait_time} seconds... (Attempt {retries}/{max_retries})")
+                time.sleep(wait_time)
+            else:
+                st.error(f"Error fetching games from Balldontlie API: {response.status_code} - {response.text}")
+                return []
+        except requests.exceptions.RequestException as e:
+            st.error(f"Network error fetching games from Balldontlie API: {e}")
+            return []
+
+    st.error("API rate limit reached for Balldontlie API. Try again later.")
+    return []
+
+def fetch_odds_api_events(date, max_retries=3, initial_delay=2):
+    """Fetch all NBA events from The Odds API for a given date."""
+    api_key = st.secrets.get("odds_api_key", None)
+    if not api_key:
+        st.error("Invalid API key for The Odds API. Check configuration.")
+        return []
+
+    url = f"{ODDS_API_URL}/sports/basketball_nba/events?date={date.strftime('%Y-%m-%d')}&apiKey={api_key}"
     
-    if not odds_api_events:
-        st.info("No odds available for today's NBA games yet.")
+    retries = 0
+    while retries < max_retries:
+        try:
+            time.sleep(initial_delay)
+            response = requests.get(url, timeout=10)
+            print(f"The Odds API Events Request URL: {response.url}")
+            print(f"The Odds API Events Response Status Code: {response.status_code}")
+            print(f"The Odds API Events Raw Response: {response.text}")
+
+            response.raise_for_status()
+            data = response.json()
+            return data if isinstance(data, list) else []
+
+        except requests.exceptions.HTTPError as e:
+            if response.status_code == 401:
+                st.error("Invalid API key for The Odds API. Check configuration.")
+                return []
+            elif response.status_code == 429:
+                retries += 1
+                wait_time = initial_delay * (2 ** retries)
+                st.warning(f"The Odds API rate limit reached. Retrying in {wait_time} seconds... (Attempt {retries}/{max_retries})")
+                time.sleep(wait_time)
+            else:
+               emblems: {response.status_code} - {response.text}")
+                return []
+        except requests.exceptions.RequestException as e:
+            st.error(f"Network error fetching events from The Odds API: {e}")
+            return []
+
+    st.error("API rate limit reached for The Odds API. Try again later.")
+    return []
+
+@st.cache_data
+def fetch_props(event_id, max_retries=3, initial_delay=2):
+    """Fetch player props from The Odds API (cached to reduce API calls)."""
+    api_key = st.secrets.get("odds_api_key", None)
+    if not api_key:
+        st.error("Invalid API key for The Odds API. Check configuration.")
+        return {}
+
+    markets = "player_points,player_rebounds,player_assists,player_steals,player_blocks"
+    url = f"{ODDS_API_URL}/sports/basketball_nba/events/{event_id}/odds?regions=us&markets={markets}&oddsFormat=american&apiKey={api_key}"
+    
+    retries = 0
+    while retries < max_retries:
+        try:
+            time.sleep(initial_delay)
+            response = requests.get(url, timeout=10)
+            print(f"The Odds API Props Request URL: {response.url}")
+            print(f"The Odds API Props Response Status Code: {response.status_code}")
+            print(f"The Odds API Props Raw Response: {response.text}")
+
+            response.raise_for_status()
+            data = response.json()
+
+            props = {}
+            if 'bookmakers' in data and data['bookmakers']:
+                for bookmaker in data['bookmakers'][:1]:  # Use first bookmaker for simplicity
+                    for market in bookmaker['markets']:
+                        prop_type = market['key'].replace('player_', '')
+                        for outcome in market['outcomes']:
+                            if 'point' in outcome:
+                                prop_name = f"{outcome['description']} {outcome['name']} {outcome['point']} {prop_type}"
+                                odds = outcome['price']
+                                props[prop_name] = {
+                                    'odds': odds,
+                                    'prop_type': prop_type,
+                                    'point': outcome['point']
+                                }
+            if not props:
+                st.info(f"No props available for event {event_id} from the bookmaker.")
+            return props
+
+        except requests.exceptions.HTTPError as e:
+            if response.status_code == 401:
+                st.error("Invalid API key for The Odds API. Check configuration.")
+                return {}
+            elif response.status_code == 429:
+                retries += 1
+                wait_time = initial_delay * (2 ** retries)
+                st.warning(f"The Odds API rate limit reached. Retrying in {wait_time} seconds... (Attempt {retries}/{max_retries})")
+                time.sleep(wait_time)
+            else:
+                st.error(f"Error fetching props from The Odds API: {response.status_code} - {response.text}")
+                return {}
+        except requests.exceptions.RequestException as e:
+            st.error(f"Network error fetching props from The Odds API: {e}")
+            return {}
+
+    st.error("API rate limit reached for The Odds API. Try again later.")
+    return {}
+
+def get_initial_confidence(odds):
+    """Calculate a simple confidence score based on odds."""
+    if odds <= -300:
+        return 0.9
+    elif -299 <= odds <= -200:
+        return 0.8
+    elif -199 <= odds <= -100:
+        return 0.7
+    elif -99 <= odds <= 100:
+        return 0.6
     else:
-        # Map Balldontlie games to The Odds API events
-        mapped_games = []
-        for game in games:
-            game_display = game["display"]
-            home_team = game["home_team"]
-            away_team = game["away_team"]
-            matching_event = next(
-                (event for event in odds_api_events if event["home_team"] == home_team and event["away_team"] == away_team),
-                None
-            )
-            if matching_event:
-                game["odds_api_event_id"] = matching_event["id"]
-                mapped_games.append(game)
-            else:
-                st.warning(f"⚠️ No matching event found in The Odds API for {game_display}.")
-        
-        if not mapped_games:
-            st.info("No matching events found in The Odds API for today's games.")
-        else:
-            # Game Selection
-            game_displays = [game["display"] for game in mapped_games]
-            selected_displays = st.multiselect(
-                "Select 2-12 Games",
-                game_displays,
-                default=None,
-                help="Choose between 2 and 12 NBA games to build your SGP.",
-                max_selections=12
-            )
-            selected_games = [game for game in mapped_games if game["display"] in selected_displays]
+        return 0.5
 
-            if len(selected_games) < 2:
-                st.warning("⚠️ Please select at least 2 games to build an SGP.")
-            else:
-                total_props = 0
-                selected_props = {}
-                odds_list = []
-                game_prop_data = []
+def detect_line_discrepancies(book_odds, confidence):
+    """Detect discrepancies between book odds and confidence score."""
+    implied_odds = 1 / (1 + (abs(book_odds) / 100) if book_odds < 0 else (book_odds / 100) + 1)
+    return confidence > implied_odds * 1.1  # Flag if confidence is 10% higher
 
-                # Analyze Each Game and Select Top Props
-                for selected_game in selected_games:
-                    available_props = fetch_props(selected_game['odds_api_event_id'])
-                    if not available_props:
-                        st.warning(f"⚠️ No props available for {selected_game['display']}. Check API key, rate limits, or game availability.")
-                        continue
+def american_odds_to_string(odds):
+    """Convert odds to string format with + or -."""
+    if odds > 0:
+        return f"+{int(odds)}"
+    return str(int(odds))
 
-                    # Filter props by odds range and prop types
-                    filtered_props = available_props
-                    if use_odds_filter:
-                        filtered_props = {
-                            prop: data for prop, data in filtered_props.items()
-                            if min_odds <= data['odds'] <= max_odds
-                        }
-                    if prop_types:
-                        filtered_props = {
-                            prop: data for prop, data in filtered_props.items()
-                            if data['prop_type'] in prop_types
-                        }
+def calculate_parlay_odds(odds_list):
+    """Calculate combined parlay odds from a list of American odds."""
+    if not odds_list:
+        return 0
+    decimal_odds = [1 + (abs(odds) / 100) if odds < 0 else (odds / 100) + 1 for odds in odds_list]
+    final_decimal_odds = np.prod(decimal_odds)
+    if final_decimal_odds > 2:
+        american_odds = (final_decimal_odds - 1) * 100
+    else:
+        american_odds = -100 / (final_decimal_odds - 1)
+    return round(american_odds, 0)
 
-                    if not filtered_props:
-                        st.info(f"No props available for {selected_game['display']} within the selected odds range or prop types.")
-                        continue
-
-                    # Calculate confidence for each prop
-                    prop_confidence_list = []
-                    for prop, prop_data in filtered_props.items():
-                        confidence_score = get_initial_confidence(prop_data['odds'])
-                        line_discrepancy = detect_line_discrepancies(prop_data['odds'], confidence_score)
-                        prop_confidence_list.append({
-                            "prop": prop,
-                            "confidence": confidence_score,
-                            "odds": prop_data['odds'],
-                            "line_discrepancy": "🔥" if line_discrepancy else "",
-                            "player_stat_key": f"{prop.split()[0]}_{prop.split()[1]}_{prop_data['prop_type']}"  # e.g., "LeBron_James_points"
-                        })
-
-                    # Sort by confidence
-                    prop_confidence_list = sorted(prop_confidence_list, key=lambda x: x['confidence'], reverse=True)
-
-                    # Select top N props while avoiding conflicts
-                    selected_prop_keys = set()  # Track selected player_stat combinations
-                    game_selected_props = []
-                    for prop_item in prop_confidence_list:
-                        player_stat_key = prop_item['player_stat_key']
-                        if player_stat_key not in selected_prop_keys and len(game_selected_props) < props_per_game:
-                            selected_prop_keys.add(player_stat_key)
-                            game_selected_props.append(prop_item)
-
-                    selected_props[selected_game['display']] = [item['prop'] for item in game_selected_props]
-                    total_props += len(game_selected_props)
-
-                    # Calculate combined odds for this game
-                    game_odds = [item['odds'] for item in game_selected_props]
-                    game_combined_odds = calculate_parlay_odds(game_odds) if game_odds else 0
-                    odds_list.extend(game_odds)
-
-                    # Store data for display
-                    game_prop_data.append({
-                        "game": selected_game,
-                        "props": game_selected_props,
-                        "combined_odds": game_combined_odds,
-                        "num_props": len(game_selected_props)
-                    })
-
-                # Enforce Max 24 Props Across All Games
-                if total_props > 24:
-                    st.error("⚠️ You can select a maximum of 24 total props across all games.")
-                elif total_props > 0:
-                    # Display Suggested Props per Game
-                    for game_data in game_prop_data:
-                        game = game_data['game']
-                        props = game_data['props']
-                        combined_odds = game_data['combined_odds']
-                        num_props = game_data['num_props']
-
-                        st.markdown(f"**SGP: {game['home_team']} @ {game['away_team']}** {american_odds_to_string(combined_odds)}")
-                        st.write(f"{num_props} SELECTIONS  6:10PM CT")  # Placeholder time
-                        for prop in props:
-                            st.markdown(f"- {prop['prop']} {prop['line_discrepancy']}")
-                        st.markdown("---")
-
-                    # Final SGP Summary
-                    final_odds = calculate_parlay_odds(odds_list)
-                    st.subheader("Final SGP Summary")
-                    st.write(f"**{total_props} Leg Same Game Parlay** {american_odds_to_string(final_odds)}")
-                    st.write(f"Includes: {len(selected_games)} Games")
-
-                    # Wager and Payout Calculation
-                    wager = st.number_input("Wager ($)", min_value=0.0, value=10.0, step=0.5)
-                    if final_odds > 0:
-                        payout = wager * (final_odds / 100)
-                    else:
-                        payout = wager / (abs(final_odds) / 100)
-                    st.write(f"To Win: ${round(payout, 2)}")
-
-                    # Sharp Money Insights
-                    st.subheader("Sharp Money Insights")
-                    sharp_money_data = get_sharp_money_insights(selected_props)
-                    st.table(sharp_money_data)
-                else:
-                    st.info("No props available for the selected games after applying filters.")
+def get_sharp_money_insights(selected_props):
+    """Simulate sharp money insights."""
+    insights = {}
+    for game, props in selected_props.items():
+        for prop in props:
+            odds = [item['odds'] for item in selected_props[game] if item['prop'] == prop][0]
+            sharp_indicator = "🔥 Sharp Money Detected" if odds <= -150 else "Public Money"
+            odds_shift = random.uniform(-0.05, 0.15)
+            insights[prop] = {"Sharp Indicator": sharp_indicator, "Odds Shift %": round(odds_shift * 100, 2)}
+    return insights
