@@ -4,6 +4,8 @@ from datetime import date
 import streamlit as st
 import time
 import random
+from nba_api.stats.endpoints import ScoreboardV2, BoxScoreTraditionalV2
+from nba_api.stats.static import teams
 
 # Constants
 BALL_DONT_LIE_API_URL = "https://api.balldontlie.io/v1"
@@ -12,8 +14,8 @@ ODDS_API_URL = "https://api.the-odds-api.com/v4"
 # Team name normalization to handle discrepancies
 TEAM_NAME_MAPPING = {
     "los angeles clippers": "la clippers",
-    "golden state warriors": "golden state warriors",  # Add more as needed
-    # Add other known discrepancies here
+    "golden state warriors": "golden state warriors",
+    # Add more as needed
 }
 
 def normalize_team_name(name):
@@ -21,62 +23,147 @@ def normalize_team_name(name):
     name = name.lower().strip()
     return TEAM_NAME_MAPPING.get(name, name)
 
+def normalize_player_name(name):
+    """Normalize player names for consistent matching."""
+    return name.lower().strip()
+
 def fetch_games(date, max_retries=3, initial_delay=2):
-    """Fetch NBA games from Balldontlie API for a given date with retries."""
+    """Fetch NBA games from the NBA API for a given date with retries."""
+    retries = 0
+    while retries < max_retries:
+        try:
+            time.sleep(initial_delay)
+            scoreboard = ScoreboardV2(game_date=date.strftime("%Y-%m-%d"))
+            games_data = scoreboard.get_dict().get("resultSets", [])[0].get("rowSet", [])
+
+            if not games_data:
+                return []
+
+            formatted_games = []
+            for game in games_data:
+                home_team_id = game[6]  # HOME_TEAM_ID
+                away_team_id = game[4]  # VISITOR_TEAM_ID
+
+                home_team_info = next(t for t in teams.get_teams() if t["id"] == home_team_id)
+                away_team_info = next(t for t in teams.get_teams() if t["id"] == away_team_id)
+
+                formatted_games.append({
+                    "id": game[0],  # GAME_ID
+                    "display": f"{home_team_info['abbreviation']} vs {away_team_info['abbreviation']}",
+                    "home_team": home_team_info["full_name"],
+                    "away_team": away_team_info["full_name"],
+                    "date": date.strftime("%Y-%m-%d"),
+                    "start_time": game[2]  # GAME_DATE_EST (includes time)
+                })
+            return formatted_games
+
+        except Exception as e:
+            retries += 1
+            wait_time = initial_delay * (2 ** retries)
+            st.warning(f"NBA API request failed. Retrying in {wait_time} seconds... (Attempt {retries}/{max_retries})")
+            time.sleep(wait_time)
+            if retries == max_retries:
+                st.error(f"Failed to fetch games from NBA API after {max_retries} attempts: {e}")
+                return []
+
+def fetch_player_stats(player_name, season="2024", opponent_team=None, max_retries=3, initial_delay=2):
+    """Fetch player season stats and historical performance from Balldontlie API."""
     api_key = st.secrets.get("balldontlie_api_key", None)
     if not api_key:
         st.error("Invalid API key for Balldontlie API. Check configuration.")
-        return []
+        return None
 
-    url = f"{BALL_DONT_LIE_API_URL}/games"
+    # Step 1: Find the player ID by name
+    url = f"{BALL_DONT_LIE_API_URL}/players"
     headers = {"Authorization": api_key}
-    params = {"dates[]": date.strftime("%Y-%m-%d")}
+    params = {"search": player_name}
 
     retries = 0
     while retries < max_retries:
         try:
-            time.sleep(initial_delay)  # Delay to avoid rate limits
+            time.sleep(initial_delay)
             response = requests.get(url, headers=headers, params=params, timeout=10)
-            print(f"Balldontlie Request URL: {response.url}")
-            print(f"Balldontlie Response Status Code: {response.status_code}")
-            print(f"Balldontlie Raw Response: {response.text}")
-
             response.raise_for_status()
+            players = response.json().get("data", [])
+            if not players:
+                return None
+            player_id = players[0]["id"]
+            break
+        except requests.exceptions.RequestException as e:
+            retries += 1
+            wait_time = initial_delay * (2 ** retries)
+            if retries == max_retries:
+                st.error(f"Failed to fetch player ID from Balldontlie API: {e}")
+                return None
+            time.sleep(wait_time)
 
-            games_data = response.json().get("data", [])
-            if not games_data:
-                return []
+    # Step 2: Fetch season averages
+    url = f"{BALL_DONT_LIE_API_URL}/season_averages"
+    params = {"season": season, "player_ids[]": player_id}
 
-            formatted_games = [
-                {
-                    "id": game["id"],
-                    "display": f"{game['home_team']['abbreviation']} vs {game['visitor_team']['abbreviation']}",
-                    "home_team": game["home_team"]["full_name"],
-                    "away_team": game["visitor_team"]["full_name"],
-                    "date": game["date"]
-                }
-                for game in games_data
-            ]
-            return formatted_games
+    retries = 0
+    while retries < max_retries:
+        try:
+            time.sleep(initial_delay)
+            response = requests.get(url, headers=headers, params=params, timeout=10)
+            response.raise_for_status()
+            stats = response.json().get("data", [])
+            if not stats:
+                return None
+            season_stats = stats[0]
+            break
+        except requests.exceptions.RequestException as e:
+            retries += 1
+            wait_time = initial_delay * (2 ** retries)
+            if retries == max_retries:
+                st.error(f"Failed to fetch season stats from Balldontlie API: {e}")
+                return None
+            time.sleep(wait_time)
 
-        except requests.exceptions.HTTPError as e:
-            if response.status_code == 401:
-                st.error("Invalid API key for Balldontlie API. Check configuration.")
-                return []
-            elif response.status_code == 429:
+    # Step 3: Fetch historical performance vs opponent (if specified)
+    historical_stats = None
+    if opponent_team:
+        # Note: Balldontlie doesn't directly support "vs opponent" stats, so we fetch game logs
+        url = f"{BALL_DONT_LIE_API_URL}/stats"
+        params = {
+            "player_ids[]": player_id,
+            "seasons[]": season,
+            "per_page": 100  # Adjust based on need
+        }
+        retries = 0
+        while retries < max_retries:
+            try:
+                time.sleep(initial_delay)
+                response = requests.get(url, headers=headers, params=params, timeout=10)
+                response.raise_for_status()
+                game_logs = response.json().get("data", [])
+                # Filter games against the opponent
+                opponent_games = [
+                    game for game in game_logs
+                    if game["team"]["full_name"] != opponent_team and
+                    (game["game"]["home_team_id"] == game["team"]["id"] and game["game"]["visitor_team"]["full_name"] == opponent_team or
+                     game["game"]["visitor_team_id"] == game["team"]["id"] and game["game"]["home_team"]["full_name"] == opponent_team)
+                ]
+                if opponent_games:
+                    # Calculate averages vs opponent
+                    historical_stats = {
+                        "pts": np.mean([game["pts"] for game in opponent_games]),
+                        "reb": np.mean([game["reb"] for game in opponent_games]),
+                        "ast": np.mean([game["ast"] for game in opponent_games]),
+                        "stl": np.mean([game["stl"] for game in opponent_games]),
+                        "blk": np.mean([game["blk"] for game in opponent_games]),
+                        "games_played": len(opponent_games)
+                    }
+                break
+            except requests.exceptions.RequestException as e:
                 retries += 1
                 wait_time = initial_delay * (2 ** retries)
-                st.warning(f"Balldontlie API rate limit reached. Retrying in {wait_time} seconds... (Attempt {retries}/{max_retries})")
+                if retries == max_retries:
+                    st.error(f"Failed to fetch game logs from Balldontlie API: {e}")
+                    return season_stats  # Return season stats without historical data
                 time.sleep(wait_time)
-            else:
-                st.error(f"Error fetching games from Balldontlie API: {response.status_code} - {response.text}")
-                return []
-        except requests.exceptions.RequestException as e:
-            st.error(f"Network error fetching games from Balldontlie API: {e}")
-            return []
 
-    st.error("API rate limit reached for Balldontlie API. Try again later.")
-    return []
+    return {"season": season_stats, "historical": historical_stats}
 
 def fetch_odds_api_events(date, max_retries=3, initial_delay=2):
     """Fetch all NBA events from The Odds API for a given date."""
@@ -110,7 +197,7 @@ def fetch_odds_api_events(date, max_retries=3, initial_delay=2):
                 st.warning(f"The Odds API rate limit reached. Retrying in {wait_time} seconds... (Attempt {retries}/{max_retries})")
                 time.sleep(wait_time)
             else:
-               emblems: {response.status_code} - {response.text}")
+                st.error(f"Error fetching events from The Odds API: {response.status_code} - {response.text}")
                 return []
         except requests.exceptions.RequestException as e:
             st.error(f"Network error fetching events from The Odds API: {e}")
@@ -149,13 +236,20 @@ def fetch_props(event_id, max_retries=3, initial_delay=2):
                         prop_type = market['key'].replace('player_', '')
                         for outcome in market['outcomes']:
                             if 'point' in outcome:
-                                prop_name = f"{outcome['description']} {outcome['name']} {outcome['point']} {prop_type}"
-                                odds = outcome['price']
-                                props[prop_name] = {
-                                    'odds': odds,
+                                # Group props by player, prop_type, and direction to support alternative lines
+                                player = outcome['description']
+                                direction = outcome['name']  # "Over" or "Under"
+                                key = f"{player}_{prop_type}_{direction}"
+                                if key not in props:
+                                    props[key] = []
+                                props[key].append({
+                                    'prop_name': f"{player} {direction} {outcome['point']} {prop_type}",
+                                    'odds': outcome['price'],
                                     'prop_type': prop_type,
-                                    'point': outcome['point']
-                                }
+                                    'point': outcome['point'],
+                                    'direction': direction,
+                                    'player': player
+                                })
             if not props:
                 st.info(f"No props available for event {event_id} from the bookmaker.")
             return props
@@ -178,6 +272,29 @@ def fetch_props(event_id, max_retries=3, initial_delay=2):
 
     st.error("API rate limit reached for The Odds API. Try again later.")
     return {}
+
+def adjust_confidence_with_stats(confidence, avg_stat, prop_line, direction, historical_stat=None):
+    """Adjust confidence score based on player's season average and historical performance."""
+    if avg_stat is None:
+        return confidence
+
+    # Adjust based on season average
+    if direction.lower() == "over":
+        adjustment = (avg_stat - prop_line) / prop_line if prop_line > 0 else 0
+    else:  # Under
+        adjustment = (prop_line - avg_stat) / prop_line if prop_line > 0 else 0
+    confidence = min(max(confidence + adjustment * 0.3, 0), 1)  # Weight season stats at 30%
+
+    # Further adjust based on historical performance vs opponent (if available)
+    if historical_stat:
+        hist_stat = historical_stat
+        if direction.lower() == "over":
+            hist_adjustment = (hist_stat - prop_line) / prop_line if prop_line > 0 else 0
+        else:  # Under
+            hist_adjustment = (prop_line - hist_stat) / prop_line if prop_line > 0 else 0
+        confidence = min(max(confidence + hist_adjustment * 0.2, 0), 1)  # Weight historical stats at 20%
+
+    return confidence
 
 def get_initial_confidence(odds):
     """Calculate a simple confidence score based on odds."""
@@ -216,11 +333,12 @@ def calculate_parlay_odds(odds_list):
     return round(american_odds, 0)
 
 def get_sharp_money_insights(selected_props):
-    """Simulate sharp money insights."""
+    """Simulate sharp money insights (placeholder for odds movement tracking)."""
     insights = {}
     for game, props in selected_props.items():
-        for prop in props:
-            odds = [item['odds'] for item in selected_props[game] if item['prop'] == prop][0]
+        for prop_item in props:
+            prop = prop_item['prop_name']
+            odds = prop_item['odds']
             sharp_indicator = "🔥 Sharp Money Detected" if odds <= -150 else "Public Money"
             odds_shift = random.uniform(-0.05, 0.15)
             insights[prop] = {"Sharp Indicator": sharp_indicator, "Odds Shift %": round(odds_shift * 100, 2)}
