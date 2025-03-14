@@ -110,7 +110,7 @@ def fetch_player_stats(player_name, season="2024", opponent_team=None, max_retri
             stats = response.json().get("data", [])
             if not stats:
                 return None
-            season_stats = stats[]
+            season_stats = stats[0]
             break
         except requests.exceptions.RequestException as e:
             retries += 1
