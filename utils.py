@@ -1,3 +1,4 @@
+
 import requests
 import numpy as np
 from datetime import date
@@ -65,6 +66,7 @@ def fetch_games(date, max_retries=3, initial_delay=2):
 
     st.error("API rate limit reached for Balldontlie API. Try again later.")
     return []
+
 def fetch_odds_api_events(date, max_retries=3, initial_delay=2):
     """Fetch all NBA events from The Odds API for a given date."""
     api_key = st.secrets.get("odds_api_key", None)
