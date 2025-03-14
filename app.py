@@ -4,11 +4,11 @@ from utils import (
     fetch_games, fetch_odds_api_events, fetch_props, fetch_player_stats,
     calculate_parlay_odds, get_initial_confidence, get_sharp_money_insights,
     detect_line_discrepancies, american_odds_to_string, normalize_team_name,
-    normalize_player_name, adjust_confidence_with_stats
+    adjust_confidence_with_stats
 )
 
 # Streamlit UI Setup
-st.set_page_config(page_title="NBA SGP+ Builder", layout="wide")
+st.set_page_config(page_title="NBA SGP Builder", layout="wide")
 st.title("NBA Same Game Parlay Builder")
 st.markdown("Build your NBA Same Game Parlay below!")
 
@@ -17,87 +17,78 @@ current_date = date.today()
 
 # Sidebar for Filters
 st.sidebar.subheader("Filters")
-
-# Odds Range Filter
 use_odds_filter = st.sidebar.checkbox("Apply Odds Range Filter", value=False)
-min_odds, max_odds = -1000, 1000  # Default: no filtering
+min_odds, max_odds = -1000, 1000
 if use_odds_filter:
     min_odds = st.sidebar.number_input("Min Odds", min_value=-1000, max_value=1000, value=-350, step=10)
     max_odds = st.sidebar.number_input("Max Odds", min_value=-1000, max_value=1000, value=200, step=10)
 
-# Prop Type Selection
 st.sidebar.subheader("Prop Types to Include")
 prop_types = st.sidebar.multiselect(
     "Select Prop Types",
-    options=["points", "rebounds", "assists", "steals", "blocks"],
-    default=["points", "rebounds", "assists", "steals", "blocks"],
+    options=["points", "rebounds", "assists"],
+    default=["points", "rebounds", "assists"],
     help="Choose which prop types to include in your SGP."
 )
 
-# Number of Props per Game
+st.sidebar.subheader("Confidence Level")
+confidence_level = st.sidebar.selectbox(
+    "Select Confidence Level",
+    options=["High", "Medium", "Low"],
+    index=1,
+    help="Filter props based on confidence score."
+)
+
 st.sidebar.subheader("Props per Game")
 props_per_game = st.sidebar.number_input(
     "Number of Props per Game", min_value=1, max_value=8, value=3, step=1,
     help="Select how many props to include per game (1-8)."
 )
 
-# Fetch Games from NBA API
+# Fetch Games
 games = fetch_games(current_date)
 
 if not games:
     st.info("No NBA games scheduled for today.")
 else:
-    # Fetch Events from The Odds API
+    # Fetch Events from The Odds API to map game IDs
     odds_api_events = fetch_odds_api_events(current_date)
     
     if not odds_api_events:
         st.info("No odds available for today's NBA games yet.")
     else:
-        # Debugging Output: Show fetched games and events
-        st.write("**Games from NBA API:**", [f"{game['display']} (Start: {game['start_time']})" for game in games])
-        st.write("**Events from The Odds API:**", [f"{event['home_team']} vs {event['away_team']}" for event in odds_api_events])
-
-        # Map NBA API games to The Odds API events
+        # Map games to Odds API events
         mapped_games = []
-        unmatched_games = []
         for game in games:
-            game_display = game["display"]
-            home_team = normalize_team_name(game["home_team"])
-            away_team = normalize_team_name(game["away_team"])
             matching_event = next(
                 (event for event in odds_api_events
-                 if normalize_team_name(event["home_team"]) == home_team
-                 and normalize_team_name(event["away_team"]) == away_team),
+                 if normalize_team_name(event["home_team"]) == normalize_team_name(game["home_team"])
+                 and normalize_team_name(event["away_team"]) == normalize_team_name(game["away_team"])),
                 None
             )
             if matching_event:
                 game["odds_api_event_id"] = matching_event["id"]
                 mapped_games.append(game)
-            else:
-                unmatched_games.append(game_display)
-
-        if unmatched_games:
-            st.warning(f"⚠️ No matching events found in The Odds API for: {', '.join(unmatched_games)}")
 
         if not mapped_games:
             st.info("No matching events found in The Odds API for today's games.")
         else:
             # Game Selection
-            game_displays = [f"{game['display']} (Start: {game['start_time']})" for game in mapped_games]
+            game_displays = [f"{game['home_team']} vs {game['away_team']} (Start: {game['start_time']})" for game in mapped_games]
             selected_displays = st.multiselect(
-                "Select 2-12 Games",
+                "Select Games",
                 game_displays,
                 default=None,
-                help="Choose between 2 and 12 NBA games to build your SGP.",
+                help="Choose NBA games to build your SGP.",
                 max_selections=12
             )
             selected_games = [
                 game for game in mapped_games
-                if f"{game['display']} (Start: {game['start_time']})" in selected_displays
+                if f"{game['home_team']} vs {game['away_team']} (Start: {game['start_time']})" in selected_displays
             ]
 
-            if len(selected_games) < 2:
-                st.warning("⚠️ Please select at least 2 games to build an SGP.")
+            if not selected_games:
+                st.warning("⚠️ Please select at least one game to build an SGP.")
             else:
                 total_props = 0
                 selected_props = {}
@@ -106,9 +97,14 @@ else:
 
                 # Analyze Each Game and Select Top Props
                 for selected_game in selected_games:
-                    available_props = fetch_props(selected_game['odds_api_event_id'])
+                    event_id = selected_game.get("odds_api_event_id")
+                    if not event_id:
+                        st.warning(f"⚠️ No event ID found for {selected_game['home_team']} vs {selected_game['away_team']}. Skipping.")
+                        continue
+
+                    available_props = fetch_props(event_id)
                     if not available_props:
-                        st.warning(f"⚠️ No props available for {selected_game['display']}. Check API key, rate limits, or game availability.")
+                        st.warning(f"⚠️ No props available for {selected_game['home_team']} vs {selected_game['away_team']}.")
                         continue
 
                     # Filter props by odds range and prop types
@@ -125,27 +121,28 @@ else:
                         }
 
                     if not filtered_props:
-                        st.info(f"No props available for {selected_game['display']} within the selected odds range or prop types.")
+                        st.info(f"No props available for {selected_game['home_team']} vs {selected_game['away_team']} within filters.")
                         continue
 
-                    # Calculate confidence for each prop, incorporating player stats
+                    # Calculate confidence for each prop using player stats
                     prop_confidence_list = []
+                    opponent_team = selected_game['home_team'] if selected_game['away_team'] != "N/A" else selected_game['home_team']
                     for key, prop_list in filtered_props.items():
                         player = prop_list[0]['player']
                         prop_type = prop_list[0]['prop_type']
                         direction = prop_list[0]['direction']
+                        prop_line = prop_list[0]['point']
 
                         # Fetch player stats from Balldontlie
-                        opponent_team = selected_game['home_team'] if selected_game['away_team'] != player else selected_game['away_team']
                         player_stats = fetch_player_stats(player, opponent_team=opponent_team)
-                        stat_key = prop_type[:3]  # e.g., "pts" for points, "reb" for rebounds
+                        stat_key = prop_type[:3]  # e.g., "pts" for points
                         season_stat = player_stats['season'].get(stat_key, None) if player_stats and 'season' in player_stats else None
                         historical_stat = player_stats['historical'].get(stat_key, None) if player_stats and player_stats.get('historical') else None
 
                         for prop_data in prop_list:
                             confidence_score = get_initial_confidence(prop_data['odds'])
                             confidence_score = adjust_confidence_with_stats(
-                                confidence_score, season_stat, prop_data['point'], prop_data['direction'], historical_stat
+                                confidence_score, season_stat, prop_line, direction, historical_stat
                             )
                             line_discrepancy = detect_line_discrepancies(prop_data['odds'], confidence_score)
                             prop_confidence_list.append({
@@ -153,17 +150,21 @@ else:
                                 "confidence": confidence_score,
                                 "odds": prop_data['odds'],
                                 "line_discrepancy": "🔥" if line_discrepancy else "",
-                                "player_stat_key": f"{player}_{prop_type}",  # e.g., "LeBron_James_points"
+                                "player_stat_key": f"{player}_{prop_type}",
                                 "prop_type": prop_type,
                                 "direction": direction,
-                                "point": prop_data['point']
+                                "point": prop_line
                             })
 
-                    # Sort by confidence
-                    prop_confidence_list = sorted(prop_confidence_list, key=lambda x: x['confidence'], reverse=True)
+                    # Sort by confidence and filter by confidence level
+                    confidence_threshold = {"High": 80, "Medium": 60, "Low": 40}[confidence_level] / 100
+                    prop_confidence_list = [
+                        prop for prop in sorted(prop_confidence_list, key=lambda x: x['confidence'], reverse=True)
+                        if prop['confidence'] * 100 >= confidence_threshold
+                    ]
 
                     # Select top N props while avoiding conflicts
-                    selected_prop_keys = set()  # Track selected player_stat combinations
+                    selected_prop_keys = set()
                     game_selected_props = []
                     for prop_item in prop_confidence_list:
                         player_stat_key = prop_item['player_stat_key']
@@ -171,37 +172,30 @@ else:
                             selected_prop_keys.add(player_stat_key)
                             game_selected_props.append(prop_item)
 
-                    selected_props[selected_game['display']] = game_selected_props
+                    selected_props[selected_game['home_team'] + " vs " + selected_game['away_team']] = game_selected_props
                     total_props += len(game_selected_props)
-
-                    # Calculate combined odds for this game
-                    game_odds = [item['odds'] for item in game_selected_props]
-                    game_combined_odds = calculate_parlay_odds(game_odds) if game_odds else 0
-                    odds_list.extend(game_odds)
+                    odds_list.extend([item['odds'] for item in game_selected_props])
 
                     # Store data for display
                     game_prop_data.append({
                         "game": selected_game,
                         "props": game_selected_props,
-                        "combined_odds": game_combined_odds,
                         "num_props": len(game_selected_props)
                     })
 
-                # Enforce Max 24 Props Across All Games
-                if total_props > 24:
-                    st.error("⚠️ You can select a maximum of 24 total props across all games.")
-                elif total_props > 0:
+                if total_props == 0:
+                    st.info("No props selected based on filters and confidence level.")
+                else:
                     # Display Suggested Props per Game
                     for game_data in game_prop_data:
                         game = game_data['game']
                         props = game_data['props']
-                        combined_odds = game_data['combined_odds']
                         num_props = game_data['num_props']
 
-                        st.markdown(f"**SGP: {game['home_team']} @ {game['away_team']}** {american_odds_to_string(combined_odds)}")
+                        st.markdown(f"**SGP: {game['home_team']} @ {game['away_team']}**")
                         st.write(f"{num_props} SELECTIONS  Start: {game['start_time']}")
                         for prop in props:
-                            st.markdown(f"- {prop['prop_name']} {prop['line_discrepancy']}")
+                            st.markdown(f"- {prop['prop_name']} ({american_odds_to_string(prop['odds'])}) {prop['line_discrepancy']}")
                         st.markdown("---")
 
                     # Final SGP Summary
@@ -222,5 +216,7 @@ else:
                     st.subheader("Sharp Money Insights")
                     sharp_money_data = get_sharp_money_insights(selected_props)
                     st.table(sharp_money_data)
-                else:
-                    st.info("No props available for the selected games after applying filters.")
+
+                    # Placeholder for Live Data (Future Enhancement)
+                    st.subheader("Live Updates (Coming Soon)")
+                    st.info("Live box scores and injury updates will be added in a future update.")
