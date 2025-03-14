@@ -10,6 +10,7 @@ from nba_api.stats.static import teams
 # Constants
 BALL_DONT_LIE_API_URL = "https://api.balldontlie.io/v1"
 ODDS_API_URL = "https://api.the-odds-api.com/v4"
+NBA_API_BASE = "https://stats.nba.com/stats"  # Placeholder for NBA API base URL
 
 # Team name normalization to handle discrepancies
 TEAM_NAME_MAPPING = {
@@ -28,16 +29,42 @@ def normalize_player_name(name):
     return name.lower().strip()
 
 def fetch_games(date, max_retries=3, initial_delay=2):
-    """Fetch NBA games from the NBA API for a given date with retries."""
+    """Fetch NBA games from the NBA API with a fallback to Balldontlie API."""
     retries = 0
     while retries < max_retries:
         try:
             time.sleep(initial_delay)
+            # Try NBA API first
             scoreboard = ScoreboardV2(game_date=date.strftime("%Y-%m-%d"))
             games_data = scoreboard.get_dict().get("resultSets", [])[0].get("rowSet", [])
 
             if not games_data:
-                return []
+                # Fallback to Balldontlie API
+                st.warning("No games found via NBA API. Falling back to Balldontlie API.")
+                api_key = st.secrets.get("balldontlie_api_key", None)
+                if not api_key:
+                    raise Exception("No Balldontlie API key available.")
+                url = f"{BALL_DONT_LIE_API_URL}/games"
+                params = {"dates[]": date.strftime("%Y-%m-%d")}
+                headers = {"Authorization": api_key}
+                response = requests.get(url, headers=headers, params=params, timeout=10)
+                response.raise_for_status()
+                games_data = response.json().get("data", [])
+                if not games_data:
+                    return []
+
+                formatted_games = []
+                for game in games_data:
+                    home_team_info = game["home_team"]
+                    away_team_info = game["visitor_team"]
+                    formatted_games.append({
+                        "home_team": home_team_info["full_name"],
+                        "away_team": away_team_info["full_name"],
+                        "game_id": game["id"],
+                        "date": game["date"],
+                        "start_time": game.get("date", "")  # Balldontlie uses "date" as a timestamp
+                    })
+                return formatted_games
 
             formatted_games = []
             for game in games_data:
@@ -48,10 +75,9 @@ def fetch_games(date, max_retries=3, initial_delay=2):
                 away_team_info = next(t for t in teams.get_teams() if t["id"] == away_team_id)
 
                 formatted_games.append({
-                    "id": game[0],  # GAME_ID
-                    "display": f"{home_team_info['abbreviation']} vs {away_team_info['abbreviation']}",
                     "home_team": home_team_info["full_name"],
                     "away_team": away_team_info["full_name"],
+                    "game_id": game[0],  # GAME_ID
                     "date": date.strftime("%Y-%m-%d"),
                     "start_time": game[2]  # GAME_DATE_EST (includes time)
                 })
@@ -60,10 +86,11 @@ def fetch_games(date, max_retries=3, initial_delay=2):
         except Exception as e:
             retries += 1
             wait_time = initial_delay * (2 ** retries)
-            st.warning(f"NBA API request failed. Retrying in {wait_time} seconds... (Attempt {retries}/{max_retries})")
+            print(f"Exception caught: {type(e).__name__} - {str(e)}")
+            st.warning(f"API request failed. Retrying in {wait_time} seconds... (Attempt {retries}/{max_retries})")
             time.sleep(wait_time)
             if retries == max_retries:
-                st.error(f"Failed to fetch games from NBA API after {max_retries} attempts: {e}")
+                st.error(f"Failed to fetch games after {max_retries} attempts: {e}")
                 return []
 
 def fetch_player_stats(player_name, season="2024", opponent_team=None, max_retries=3, initial_delay=2):
@@ -110,7 +137,7 @@ def fetch_player_stats(player_name, season="2024", opponent_team=None, max_retri
             stats = response.json().get("data", [])
             if not stats:
                 return None
-            season_stats = stats[0]  # Corrected line
+            season_stats = stats[0]
             break
         except requests.exceptions.RequestException as e:
             retries += 1
@@ -123,12 +150,11 @@ def fetch_player_stats(player_name, season="2024", opponent_team=None, max_retri
     # Step 3: Fetch historical performance vs opponent (if specified)
     historical_stats = None
     if opponent_team:
-        # Note: Balldontlie doesn't directly support "vs opponent" stats, so we fetch game logs
         url = f"{BALL_DONT_LIE_API_URL}/stats"
         params = {
             "player_ids[]": player_id,
             "seasons[]": season,
-            "per_page": 100  # Adjust based on need
+            "per_page": 100
         }
         retries = 0
         while retries < max_retries:
@@ -137,7 +163,6 @@ def fetch_player_stats(player_name, season="2024", opponent_team=None, max_retri
                 response = requests.get(url, headers=headers, params=params, timeout=10)
                 response.raise_for_status()
                 game_logs = response.json().get("data", [])
-                # Filter games against the opponent (expanded for clarity)
                 opponent_games = []
                 for game in game_logs:
                     if game["team"]["full_name"] != opponent_team:
@@ -149,7 +174,6 @@ def fetch_player_stats(player_name, season="2024", opponent_team=None, max_retri
                             opponent_games.append(game)
 
                 if opponent_games:
-                    # Calculate averages vs opponent
                     historical_stats = {
                         "pts": np.mean([game["pts"] for game in opponent_games]),
                         "reb": np.mean([game["reb"] for game in opponent_games]),
@@ -164,7 +188,7 @@ def fetch_player_stats(player_name, season="2024", opponent_team=None, max_retri
                 wait_time = initial_delay * (2 ** retries)
                 if retries == max_retries:
                     st.error(f"Failed to fetch game logs from Balldontlie API: {e}")
-                    return season_stats  # Return season stats without historical data
+                    return season_stats
                 time.sleep(wait_time)
 
     return {"season": season_stats, "historical": historical_stats}
@@ -176,17 +200,19 @@ def fetch_odds_api_events(date, max_retries=3, initial_delay=2):
         st.error("Invalid API key for The Odds API. Check configuration.")
         return []
 
-    url = f"{ODDS_API_URL}/sports/basketball_nba/events?date={date.strftime('%Y-%m-%d')}&apiKey={api_key}"
+    url = f"{ODDS_API_URL}/sports/basketball_nba/events"
+    params = {
+        "date": date.strftime("%Y-%m-%d"),
+        "apiKey": api_key,
+        "regions": "us",
+        "oddsFormat": "american"
+    }
     
     retries = 0
     while retries < max_retries:
         try:
             time.sleep(initial_delay)
-            response = requests.get(url, timeout=10)
-            print(f"The Odds API Events Request URL: {response.url}")
-            print(f"The Odds API Events Response Status Code: {response.status_code}")
-            print(f"The Odds API Events Raw Response: {response.text}")
-
+            response = requests.get(url, params=params, timeout=10)
             response.raise_for_status()
             data = response.json()
             return data if isinstance(data, list) else []
@@ -204,32 +230,36 @@ def fetch_odds_api_events(date, max_retries=3, initial_delay=2):
                 st.error(f"Error fetching events from The Odds API: {response.status_code} - {response.text}")
                 return []
         except requests.exceptions.RequestException as e:
-            st.error(f"Network error fetching events from The Odds API: {e}")
-            return []
+            retries += 1
+            wait_time = initial_delay * (2 ** retries)
+            st.warning(f"Network error fetching events from The Odds API: {e}. Retrying in {wait_time} seconds... (Attempt {retries}/{max_retries})")
+            time.sleep(wait_time)
 
     st.error("API rate limit reached for The Odds API. Try again later.")
     return []
 
 @st.cache_data
 def fetch_props(event_id, max_retries=3, initial_delay=2):
-    """Fetch player props from The Odds API (cached to reduce API calls)."""
+    """Fetch player props from The Odds API with support for alternative lines."""
     api_key = st.secrets.get("odds_api_key", None)
     if not api_key:
         st.error("Invalid API key for The Odds API. Check configuration.")
         return {}
 
-    markets = "player_points,player_rebounds,player_assists,player_steals,player_blocks"
-    url = f"{ODDS_API_URL}/sports/basketball_nba/events/{event_id}/odds?regions=us&markets={markets}&oddsFormat=american&apiKey={api_key}"
+    markets = "player_points,player_rebounds,player_assists"
+    url = f"{ODDS_API_URL}/sports/basketball_nba/events/{event_id}/odds"
+    params = {
+        "apiKey": api_key,
+        "regions": "us",
+        "markets": markets,
+        "oddsFormat": "american"
+    }
     
     retries = 0
     while retries < max_retries:
         try:
             time.sleep(initial_delay)
-            response = requests.get(url, timeout=10)
-            print(f"The Odds API Props Request URL: {response.url}")
-            print(f"The Odds API Props Response Status Code: {response.status_code}")
-            print(f"The Odds API Props Raw Response: {response.text}")
-
+            response = requests.get(url, params=params, timeout=10)
             response.raise_for_status()
             data = response.json()
 
@@ -240,7 +270,6 @@ def fetch_props(event_id, max_retries=3, initial_delay=2):
                         prop_type = market['key'].replace('player_', '')
                         for outcome in market['outcomes']:
                             if 'point' in outcome:
-                                # Group props by player, prop_type, and direction to support alternative lines
                                 player = outcome['description']
                                 direction = outcome['name']  # "Over" or "Under"
                                 key = f"{player}_{prop_type}_{direction}"
@@ -271,8 +300,10 @@ def fetch_props(event_id, max_retries=3, initial_delay=2):
                 st.error(f"Error fetching props from The Odds API: {response.status_code} - {response.text}")
                 return {}
         except requests.exceptions.RequestException as e:
-            st.error(f"Network error fetching props from The Odds API: {e}")
-            return {}
+            retries += 1
+            wait_time = initial_delay * (2 ** retries)
+            st.warning(f"Network error fetching props from The Odds API: {e}. Retrying in {wait_time} seconds... (Attempt {retries}/{max_retries})")
+            time.sleep(wait_time)
 
     st.error("API rate limit reached for The Odds API. Try again later.")
     return {}
