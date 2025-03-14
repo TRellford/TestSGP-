@@ -110,7 +110,7 @@ def fetch_player_stats(player_name, season="2024", opponent_team=None, max_retri
             stats = response.json().get("data", [])
             if not stats:
                 return None
-            season_stats = stats[0]
+            season_stats = stats[0]  # Corrected line
             break
         except requests.exceptions.RequestException as e:
             retries += 1
@@ -137,13 +137,17 @@ def fetch_player_stats(player_name, season="2024", opponent_team=None, max_retri
                 response = requests.get(url, headers=headers, params=params, timeout=10)
                 response.raise_for_status()
                 game_logs = response.json().get("data", [])
-                # Filter games against the opponent
-                opponent_games = [
-                    game for game in game_logs
-                    if game["team"]["full_name"] != opponent_team and
-                    (game["game"]["home_team_id"] == game["team"]["id"] and game["game"]["visitor_team"]["full_name"] == opponent_team or
-                     game["game"]["visitor_team_id"] == game["team"]["id"] and game["game"]["home_team"]["full_name"] == opponent_team)
-                ]
+                # Filter games against the opponent (expanded for clarity)
+                opponent_games = []
+                for game in game_logs:
+                    if game["team"]["full_name"] != opponent_team:
+                        is_home_team = game["game"]["home_team_id"] == game["team"]["id"]
+                        is_away_team = game["game"]["visitor_team_id"] == game["team"]["id"]
+                        home_opponent_match = is_home_team and game["game"]["visitor_team"]["full_name"] == opponent_team
+                        away_opponent_match = is_away_team and game["game"]["home_team"]["full_name"] == opponent_team
+                        if home_opponent_match or away_opponent_match:
+                            opponent_games.append(game)
+
                 if opponent_games:
                     # Calculate averages vs opponent
                     historical_stats = {
